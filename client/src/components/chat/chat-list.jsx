@@ -14,21 +14,27 @@ const ChatList = () => {
   const [searchQuery, setSearchQuery] = useState("");
 
   const filteredChats =
-    chats?.filter(
-      (chat) =>
-        chat.groupName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        chat.participants?.some(
-          (p) =>
-            p._id !== currentUserId &&
-            p.name?.toLowerCase().includes(searchQuery.toLowerCase())
-        )
-    ) || [];
+    chats?.filter((chat) => {
+      const participants = chat.participants || [];
+      const isParticipant = participants.some((p) => p._id?.toString?.() === currentUserId?.toString?.());
+      if (!isParticipant) return false;
+
+      if (!searchQuery) return true;
+      const query = searchQuery.toLowerCase();
+
+      const matchesGroup = chat.groupName?.toLowerCase().includes(query);
+      const matchesUser = participants.some(
+        (p) => p._id?.toString?.() !== currentUserId?.toString?.() && p.name?.toLowerCase().includes(query)
+      );
+      return matchesGroup || matchesUser;
+    }) || [];
 
   useEffect(() => {
     fetchChats();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRoute = (id) => {
+    useChat.getState().clearUnread(id); // clear badge immediately on click
     navigate(`/chat/${id}`);
   };
 
@@ -48,9 +54,9 @@ const ChatList = () => {
                 {searchQuery ? "No chat found" : "No chats created"}
               </div>
             ) : (
-              filteredChats?.map((chat) => (
+              filteredChats?.map((chat, index) => (
                 <ChatListItem
-                  key={chat._id}
+                  key={`${chat._id}-${index}`}
                   chat={chat}
                   currentUserId={currentUserId}
                   onClick={() => onRoute(chat._id)}

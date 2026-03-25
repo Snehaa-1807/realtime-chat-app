@@ -1,8 +1,7 @@
 import { io } from "socket.io-client";
 import { create } from "zustand";
 
-const BASE_URL =
-  import.meta.env.MODE === "development" ? import.meta.env.VITE_API_URL : "/";
+const BASE_URL = import.meta.env.VITE_API_URL || "/";
 
 export const useSocket = create((set, get) => ({
   socket: null,

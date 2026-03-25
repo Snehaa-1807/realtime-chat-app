@@ -31,6 +31,7 @@ const getUserChatsController = asyncHandler(async (req, res) => {
 const getSingleChatController = asyncHandler(async (req, res) => {
   const userId = req.user?._id;
   const { id } = chatIdSchema.parse(req.params);
+  console.log("getSingleChat", { userId, id });
   const { chat, messages } = await getSingleChatService(id, userId);
 
   return res.status(HTTPSTATUS.OK).json({

@@ -1,9 +1,12 @@
 const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const { Env } = require("../config/env.config");
+const { validateChatParticipant } = require("../services/chat.service");
+const UserModel = require("../models/user.model");
+const MessageModel = require("../models/message.model");
 
 let io = null;
-const onlineUsers = new Map();
+const onlineUsers = new Map(); // userId -> socketId
 
 const initializeSocket = (httpServer) => {
   io = new Server(httpServer, {
@@ -21,7 +24,6 @@ const initializeSocket = (httpServer) => {
       const rawCookie = socket.handshake.headers.cookie;
       if (!rawCookie) return next(new Error("Unauthorized"));
 
-      // Safely parse all cookies (JWT tokens contain "=" so naive split breaks)
       const cookies = Object.fromEntries(
         rawCookie.split(";").map((c) => {
           const [key, ...val] = c.trim().split("=");
@@ -45,39 +47,129 @@ const initializeSocket = (httpServer) => {
     const userId = socket.userId;
     const newSocketId = socket.id;
 
-    if (!userId) {
-      socket.disconnect(true);
-      return;
-    }
+    if (!userId) { socket.disconnect(true); return; }
 
     onlineUsers.set(userId, newSocketId);
-    io?.emit("online:users", Array.from(onlineUsers.keys()));
-
+    io.emit("online:users", Array.from(onlineUsers.keys()));
     socket.join(`user:${userId}`);
 
+    // ── Chat room join/leave ──────────────────────────────────────────────
     socket.on("chat:join", async (chatId, callback) => {
       try {
-        const { validateChatParticipant } = require("../services/chat.service");
         await validateChatParticipant(chatId, userId);
         socket.join(`chat:${chatId}`);
-        console.log(`User ${userId} join room chat:${chatId}`);
         callback?.();
-      } catch (error) {
+      } catch {
         callback?.("Error joining chat");
       }
     });
 
     socket.on("chat:leave", (chatId) => {
-      if (chatId) {
-        socket.leave(`chat:${chatId}`);
-        console.log(`User ${userId} left room chat:${chatId}`);
+      if (chatId) socket.leave(`chat:${chatId}`);
+    });
+
+    // ── Typing indicator ─────────────────────────────────────────────────
+    socket.on("typing:start", ({ chatId }) => {
+      socket.to(`chat:${chatId}`).emit("typing:start", { userId, chatId });
+    });
+
+    socket.on("typing:stop", ({ chatId }) => {
+      socket.to(`chat:${chatId}`).emit("typing:stop", { userId, chatId });
+    });
+
+    // ── Message read receipt ─────────────────────────────────────────────
+    socket.on("message:read", async ({ chatId, messageIds }) => {
+      try {
+        if (!messageIds?.length) return;
+        await MessageModel.updateMany(
+          { _id: { $in: messageIds }, readBy: { $ne: userId } },
+          { $addToSet: { readBy: userId }, $set: { status: "read" } }
+        );
+        // Notify sender their messages were read
+        io.to(`chat:${chatId}`).emit("message:read", { chatId, messageIds, readBy: userId });
+      } catch (err) {
+        console.error("message:read error", err.message);
       }
     });
 
-    socket.on("disconnect", () => {
+    // ── Message reaction ─────────────────────────────────────────────────
+    socket.on("message:react", async ({ messageId, emoji, chatId }) => {
+      try {
+        const message = await MessageModel.findById(messageId);
+        if (!message) return;
+
+        const existingIdx = message.reactions.findIndex(
+          (r) => r.userId.toString() === userId
+        );
+
+        if (existingIdx !== -1) {
+          if (message.reactions[existingIdx].emoji === emoji) {
+            // Same emoji — remove reaction (toggle off)
+            message.reactions.splice(existingIdx, 1);
+          } else {
+            // Different emoji — update
+            message.reactions[existingIdx].emoji = emoji;
+          }
+        } else {
+          message.reactions.push({ userId, emoji });
+        }
+
+        await message.save();
+        io.to(`chat:${chatId}`).emit("message:reaction", {
+          messageId,
+          chatId,
+          reactions: message.reactions,
+        });
+      } catch (err) {
+        console.error("message:react error", err.message);
+      }
+    });
+
+    // ── Delete message ───────────────────────────────────────────────────
+    socket.on("message:delete", async ({ messageId, chatId, deleteForEveryone }) => {
+      try {
+        const message = await MessageModel.findById(messageId);
+        if (!message) return;
+        if (message.sender.toString() !== userId) return; // only sender can delete
+
+        if (deleteForEveryone) {
+          await MessageModel.findByIdAndUpdate(messageId, {
+            deletedForEveryone: true,
+            content: null,
+            image: null,
+          });
+          io.to(`chat:${chatId}`).emit("message:deleted", {
+            messageId,
+            chatId,
+            deleteForEveryone: true,
+          });
+        } else {
+          await MessageModel.findByIdAndUpdate(messageId, {
+            $addToSet: { deletedFor: userId },
+          });
+          socket.emit("message:deleted", {
+            messageId,
+            chatId,
+            deleteForEveryone: false,
+          });
+        }
+      } catch (err) {
+        console.error("message:delete error", err.message);
+      }
+    });
+
+    // ── Disconnect — update lastSeen ──────────────────────────────────────
+    socket.on("disconnect", async () => {
       if (onlineUsers.get(userId) === newSocketId) {
-        if (userId) onlineUsers.delete(userId);
-        io?.emit("online:users", Array.from(onlineUsers.keys()));
+        onlineUsers.delete(userId);
+        io.emit("online:users", Array.from(onlineUsers.keys()));
+
+        // Save lastSeen timestamp
+        try {
+          await UserModel.findByIdAndUpdate(userId, { lastSeen: new Date() });
+          io.emit("user:lastSeen", { userId, lastSeen: new Date().toISOString() });
+        } catch {}
+
         console.log("socket disconnected", { userId, newSocketId });
       }
     });
@@ -89,17 +181,14 @@ const getIO = () => {
   return io;
 };
 
-const emitNewChatToParticipants = (participantIds = [], chat) => {
+const emitNewChatToParticpants = (participantIds = [], chat) => {
   const io = getIO();
-  for (const participantId of participantIds) {
-    io.to(`user:${participantId}`).emit("chat:new", chat);
-  }
+  for (const id of participantIds) io.to(`user:${id}`).emit("chat:new", chat);
 };
 
 const emitNewMessageToChatRoom = (senderId, chatId, message) => {
   const io = getIO();
   const senderSocketId = onlineUsers.get(senderId?.toString());
-
   if (senderSocketId) {
     io.to(`chat:${chatId}`).except(senderSocketId).emit("message:new", message);
   } else {
@@ -109,30 +198,28 @@ const emitNewMessageToChatRoom = (senderId, chatId, message) => {
 
 const emitLastMessageToParticipants = (participantIds, chatId, lastMessage) => {
   const io = getIO();
-  const payload = { chatId, lastMessage };
-  for (const participantId of participantIds) {
-    io.to(`user:${participantId}`).emit("chat:update", payload);
+  for (const id of participantIds) {
+    io.to(`user:${id}`).emit("chat:update", { chatId, lastMessage });
   }
 };
 
-// AI streaming events
 const emitAIStreamChunk = (participantIds, chatId, data) => {
   const io = getIO();
-  for (const participantId of participantIds) {
-    io.to(`user:${participantId}`).emit("ai:stream:chunk", { chatId, ...data });
+  for (const id of participantIds) {
+    io.to(`user:${id}`).emit("ai:stream:chunk", { chatId, ...data });
   }
 };
 
 const emitAIStreamDone = (participantIds, chatId, data) => {
   const io = getIO();
-  for (const participantId of participantIds) {
-    io.to(`user:${participantId}`).emit("ai:stream:done", { chatId, ...data });
+  for (const id of participantIds) {
+    io.to(`user:${id}`).emit("ai:stream:done", { chatId, ...data });
   }
 };
 
 module.exports = {
   initializeSocket,
-  emitNewChatToParticipants,
+  emitNewChatToParticpants,
   emitNewMessageToChatRoom,
   emitLastMessageToParticipants,
   emitAIStreamChunk,

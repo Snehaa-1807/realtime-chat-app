@@ -1,4 +1,4 @@
-const { emitNewChatToParticipants } = require("../lib/socket");
+const { emitNewChatToParticpants } = require("../lib/socket");
 const ChatModel = require("../models/chat.model");
 const MessageModel = require("../models/message.model");
 const UserModel = require("../models/user.model");
@@ -57,7 +57,7 @@ const createChatService = async (userId, body) => {
   const participantIdStrings = populatedChat.participants.map((p) =>
     p._id.toString()
   );
-  emitNewChatToParticipants(participantIdStrings, populatedChat);
+  emitNewChatToParticpants(participantIdStrings, populatedChat);
 
   return populatedChat;
 };
@@ -66,12 +66,12 @@ const getUserChatsService = async (userId) => {
   const chats = await ChatModel.find({
     participants: { $in: [userId] },
   })
-    .populate("participants", "name avatar")
+    .populate("participants", "_id name avatar isAI")
     .populate({
       path: "lastMessage",
       populate: {
         path: "sender",
-        select: "name avatar",
+        select: "_id name avatar",
       },
     })
     .sort({ updatedAt: -1 });
@@ -79,24 +79,30 @@ const getUserChatsService = async (userId) => {
 };
 
 const getSingleChatService = async (chatId, userId) => {
+  console.log("getSingleChatService", { chatId, userId });
   const chat = await ChatModel.findOne({
     _id: chatId,
     participants: { $in: [userId] },
   }).populate("participants", "name avatar");
 
-  if (!chat)
-    throw new BadRequestException(
-      "Chat not found or you are not authorized to view this chat"
-    );
+  if (!chat) {
+    // Check if chat exists at all
+    const existingChat = await ChatModel.findById(chatId);
+    if (!existingChat) {
+      throw new NotFoundException("Chat not found");
+    } else {
+      throw new BadRequestException("You are not authorized to view this chat");
+    }
+  }
 
   const messages = await MessageModel.find({ chatId })
-    .populate("sender", "name avatar")
+    .populate("sender", "_id name avatar isAI")
     .populate({
       path: "replyTo",
       select: "content image sender",
       populate: {
         path: "sender",
-        select: "name avatar",
+        select: "_id name avatar",
       },
     })
     .sort({ createdAt: 1 });

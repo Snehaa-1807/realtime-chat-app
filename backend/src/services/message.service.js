@@ -12,6 +12,7 @@ const {
 const { streamGeminiReply, buildChatHistory } = require("./gemini.service");
 
 const sendMessageService = async (userId, body) => {
+  console.log("sendMessage", { userId, chatId: body.chatId });
   const { chatId, content, image, replyToId } = body;
 
   const chat = await ChatModel.findOne({
@@ -54,11 +55,11 @@ const sendMessageService = async (userId, body) => {
   });
 
   await newMessage.populate([
-    { path: "sender", select: "name avatar isAI" },
+    { path: "sender", select: "_id name avatar isAI" },
     {
       path: "replyTo",
       select: "content image sender",
-      populate: { path: "sender", select: "name avatar" },
+      populate: { path: "sender", select: "_id name avatar" },
     },
   ]);
 
