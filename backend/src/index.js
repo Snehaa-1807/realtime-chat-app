@@ -1,5 +1,4 @@
 require("dotenv/config");
-const path = require("path");
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
@@ -47,26 +46,7 @@ app.get(
 
 app.use("/api", routes);
 
-if (Env.NODE_ENV === "production") {
-  const clientPath = path.resolve(__dirname, "../../client/dist");
-  app.use(express.static(clientPath));
-  app.get(/^(?!\/api).*/, (req, res) => {
-    res.sendFile(path.join(clientPath, "index.html"));
-  });
-}
-
 app.use(errorHandler);
-
-server.on("error", (error) => {
-  if (error.code === "EADDRINUSE") {
-    console.error(
-      `Port ${Env.PORT} is already in use. Please stop the other process or change PORT in your .env`
-    );
-    process.exit(1);
-  }
-  console.error("Server error", error);
-  process.exit(1);
-});
 
 server.listen(Env.PORT, async () => {
   await connectDatabase();

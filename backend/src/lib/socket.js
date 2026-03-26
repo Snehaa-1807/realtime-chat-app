@@ -1,7 +1,6 @@
 const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const { Env } = require("../config/env.config");
-const { validateChatParticipant } = require("../services/chat.service");
 const UserModel = require("../models/user.model");
 const MessageModel = require("../models/message.model");
 
@@ -56,6 +55,8 @@ const initializeSocket = (httpServer) => {
     // ── Chat room join/leave ──────────────────────────────────────────────
     socket.on("chat:join", async (chatId, callback) => {
       try {
+        // Lazy require to avoid circular dependency
+        const { validateChatParticipant } = require("../services/chat.service");
         await validateChatParticipant(chatId, userId);
         socket.join(`chat:${chatId}`);
         callback?.();
