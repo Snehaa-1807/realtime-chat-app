@@ -18,6 +18,7 @@ const initializeSocket = (httpServer) => {
     transports: ["websocket", "polling"],
   });
 
+  // 🔐 AUTH MIDDLEWARE
   io.use(async (socket, next) => {
     try {
       const rawCookie = socket.handshake.headers.cookie;
@@ -29,6 +30,7 @@ const initializeSocket = (httpServer) => {
           return [key.trim(), val.join("=").trim()];
         })
       );
+
       const token = cookies["accessToken"];
       if (!token) return next(new Error("Unauthorized"));
 
@@ -46,17 +48,23 @@ const initializeSocket = (httpServer) => {
     const userId = socket.userId;
     const newSocketId = socket.id;
 
-    if (!userId) { socket.disconnect(true); return; }
+    if (!userId) {
+      socket.disconnect(true);
+      return;
+    }
 
+    // ✅ Track online users
     onlineUsers.set(userId, newSocketId);
     io.emit("online:users", Array.from(onlineUsers.keys()));
+
     socket.join(`user:${userId}`);
 
-    // ── Chat room join/leave ──────────────────────────────────────────────
+    // ─────────────── CHAT JOIN ───────────────
     socket.on("chat:join", async (chatId, callback) => {
       try {
-        // Lazy require to avoid circular dependency
+        // ✅ FIX: moved require here (no circular dependency)
         const { validateChatParticipant } = require("../services/chat.service");
+
         await validateChatParticipant(chatId, userId);
         socket.join(`chat:${chatId}`);
         callback?.();
@@ -69,7 +77,7 @@ const initializeSocket = (httpServer) => {
       if (chatId) socket.leave(`chat:${chatId}`);
     });
 
-    // ── Typing indicator ─────────────────────────────────────────────────
+    // ─────────────── TYPING ───────────────
     socket.on("typing:start", ({ chatId }) => {
       socket.to(`chat:${chatId}`).emit("typing:start", { userId, chatId });
     });
@@ -78,22 +86,27 @@ const initializeSocket = (httpServer) => {
       socket.to(`chat:${chatId}`).emit("typing:stop", { userId, chatId });
     });
 
-    // ── Message read receipt ─────────────────────────────────────────────
+    // ─────────────── READ RECEIPTS ───────────────
     socket.on("message:read", async ({ chatId, messageIds }) => {
       try {
         if (!messageIds?.length) return;
+
         await MessageModel.updateMany(
           { _id: { $in: messageIds }, readBy: { $ne: userId } },
           { $addToSet: { readBy: userId }, $set: { status: "read" } }
         );
-        // Notify sender their messages were read
-        io.to(`chat:${chatId}`).emit("message:read", { chatId, messageIds, readBy: userId });
+
+        io.to(`chat:${chatId}`).emit("message:read", {
+          chatId,
+          messageIds,
+          readBy: userId,
+        });
       } catch (err) {
         console.error("message:read error", err.message);
       }
     });
 
-    // ── Message reaction ─────────────────────────────────────────────────
+    // ─────────────── REACTIONS ───────────────
     socket.on("message:react", async ({ messageId, emoji, chatId }) => {
       try {
         const message = await MessageModel.findById(messageId);
@@ -105,10 +118,8 @@ const initializeSocket = (httpServer) => {
 
         if (existingIdx !== -1) {
           if (message.reactions[existingIdx].emoji === emoji) {
-            // Same emoji — remove reaction (toggle off)
             message.reactions.splice(existingIdx, 1);
           } else {
-            // Different emoji — update
             message.reactions[existingIdx].emoji = emoji;
           }
         } else {
@@ -116,6 +127,7 @@ const initializeSocket = (httpServer) => {
         }
 
         await message.save();
+
         io.to(`chat:${chatId}`).emit("message:reaction", {
           messageId,
           chatId,
@@ -126,12 +138,13 @@ const initializeSocket = (httpServer) => {
       }
     });
 
-    // ── Delete message ───────────────────────────────────────────────────
+    // ─────────────── DELETE MESSAGE ───────────────
     socket.on("message:delete", async ({ messageId, chatId, deleteForEveryone }) => {
       try {
         const message = await MessageModel.findById(messageId);
         if (!message) return;
-        if (message.sender.toString() !== userId) return; // only sender can delete
+
+        if (message.sender.toString() !== userId) return;
 
         if (deleteForEveryone) {
           await MessageModel.findByIdAndUpdate(messageId, {
@@ -139,6 +152,7 @@ const initializeSocket = (httpServer) => {
             content: null,
             image: null,
           });
+
           io.to(`chat:${chatId}`).emit("message:deleted", {
             messageId,
             chatId,
@@ -148,6 +162,7 @@ const initializeSocket = (httpServer) => {
           await MessageModel.findByIdAndUpdate(messageId, {
             $addToSet: { deletedFor: userId },
           });
+
           socket.emit("message:deleted", {
             messageId,
             chatId,
@@ -159,16 +174,22 @@ const initializeSocket = (httpServer) => {
       }
     });
 
-    // ── Disconnect — update lastSeen ──────────────────────────────────────
+    // ─────────────── DISCONNECT ───────────────
     socket.on("disconnect", async () => {
       if (onlineUsers.get(userId) === newSocketId) {
         onlineUsers.delete(userId);
+
         io.emit("online:users", Array.from(onlineUsers.keys()));
 
-        // Save lastSeen timestamp
         try {
-          await UserModel.findByIdAndUpdate(userId, { lastSeen: new Date() });
-          io.emit("user:lastSeen", { userId, lastSeen: new Date().toISOString() });
+          await UserModel.findByIdAndUpdate(userId, {
+            lastSeen: new Date(),
+          });
+
+          io.emit("user:lastSeen", {
+            userId,
+            lastSeen: new Date().toISOString(),
+          });
         } catch {}
 
         console.log("socket disconnected", { userId, newSocketId });
@@ -177,6 +198,7 @@ const initializeSocket = (httpServer) => {
   });
 };
 
+// ─────────────── EMITTER HELPERS ───────────────
 const getIO = () => {
   if (!io) throw new Error("Socket.IO not initialized");
   return io;
@@ -184,12 +206,15 @@ const getIO = () => {
 
 const emitNewChatToParticpants = (participantIds = [], chat) => {
   const io = getIO();
-  for (const id of participantIds) io.to(`user:${id}`).emit("chat:new", chat);
+  for (const id of participantIds) {
+    io.to(`user:${id}`).emit("chat:new", chat);
+  }
 };
 
 const emitNewMessageToChatRoom = (senderId, chatId, message) => {
   const io = getIO();
   const senderSocketId = onlineUsers.get(senderId?.toString());
+
   if (senderSocketId) {
     io.to(`chat:${chatId}`).except(senderSocketId).emit("message:new", message);
   } else {
@@ -200,21 +225,30 @@ const emitNewMessageToChatRoom = (senderId, chatId, message) => {
 const emitLastMessageToParticipants = (participantIds, chatId, lastMessage) => {
   const io = getIO();
   for (const id of participantIds) {
-    io.to(`user:${id}`).emit("chat:update", { chatId, lastMessage });
+    io.to(`user:${id}`).emit("chat:update", {
+      chatId,
+      lastMessage,
+    });
   }
 };
 
 const emitAIStreamChunk = (participantIds, chatId, data) => {
   const io = getIO();
   for (const id of participantIds) {
-    io.to(`user:${id}`).emit("ai:stream:chunk", { chatId, ...data });
+    io.to(`user:${id}`).emit("ai:stream:chunk", {
+      chatId,
+      ...data,
+    });
   }
 };
 
 const emitAIStreamDone = (participantIds, chatId, data) => {
   const io = getIO();
   for (const id of participantIds) {
-    io.to(`user:${id}`).emit("ai:stream:done", { chatId, ...data });
+    io.to(`user:${id}`).emit("ai:stream:done", {
+      chatId,
+      ...data,
+    });
   }
 };
 
