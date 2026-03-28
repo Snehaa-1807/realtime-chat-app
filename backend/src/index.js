@@ -1,5 +1,5 @@
 require("dotenv/config");
-const express = require("express"); // ✅ path removed
+const express = require("express");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const http = require("http");
@@ -13,54 +13,53 @@ const connectDatabase = require("./config/database.config");
 const { initializeSocket } = require("./lib/socket");
 const routes = require("./routes");
 
-// Must be required after env is loaded
 require("./config/passport.config");
 
 const app = express();
 const server = http.createServer(app);
 
-// Initialize Socket.IO
 initializeSocket(server);
 
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
+
+// CORS — must support cross-domain cookies (Vercel frontend + Render backend)
 app.use(
   cors({
-    origin: Env.FRONTEND_ORIGIN,
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      const allowedOrigins = Env.FRONTEND_ORIGIN
+        ? Env.FRONTEND_ORIGIN.split(",").map((o) => o.trim())
+        : [];
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.log(`CORS blocked origin: ${origin}`);
+        callback(null, false);
+      }
+    },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
 app.use(passport.initialize());
 
-// ✅ Health route
 app.get(
   "/health",
   asyncHandler(async (req, res) => {
-    res.status(HTTPSTATUS.OK).json({
-      message: "Server is healthy",
-      status: "OK",
-    });
+    res.status(HTTPSTATUS.OK).json({ message: "Server is healthy", status: "OK" });
   })
 );
 
-// ✅ Optional root route (recommended)
-app.get("/", (req, res) => {
-  res.send("API is running 🚀");
-});
-
 app.use("/api", routes);
-
-// ❌ REMOVED static frontend serving block
-
 app.use(errorHandler);
 
 server.on("error", (error) => {
   if (error.code === "EADDRINUSE") {
-    console.error(
-      `Port ${Env.PORT} is already in use. Please stop the other process or change PORT in your .env`
-    );
+    console.error(`Port ${Env.PORT} is already in use. Please stop the other process or change PORT in your .env`);
     process.exit(1);
   }
   console.error("Server error", error);
